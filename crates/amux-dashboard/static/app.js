@@ -6884,7 +6884,15 @@ function _notifPush(icon, title, body, session, card, kind) {
     return;
   }
   _notifShowBanner(icon, title, body, session, card);
-  _notifFireNative(title, body, session, card);
+  _notifFireNative(title, body, session, card, _notifSharedTag(kind, session));
+}
+
+// The tag a notification shares with the server's web push for the same
+// event, so a device that gets both (a desktop browser with amux in a
+// background tab: the page sees the goal met AND goal_keeper pushes it) shows
+// one. Must match goal_keeper.rs notify_met_once's `goal-met:{name}`.
+function _notifSharedTag(kind, session) {
+  return kind === 'goal' && session ? 'goal-met:' + session : '';
 }
 
 // One device alert per transition, however many tabs are open. Each tab runs
@@ -6907,7 +6915,7 @@ function _notifClaimOnce(sig) {
   return Promise.resolve(claim());
 }
 
-async function _notifFireNative(title, body, session, card) {
+async function _notifFireNative(title, body, session, card, sharedTag) {
   if (!amuxNotifyAllowed('native')) return;
   if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
   // In front, the in-app pop-up is the notification (when pop-ups are off, the
@@ -6926,7 +6934,7 @@ async function _notifFireNative(title, body, session, card) {
   }
   const opts = {
     body, icon: '/icon-notification-192.png', badge: '/icon-badge-96.png',   // same as sw.js push
-    tag: 'amux-' + (session || Date.now()), renotify: true, silent: false,
+    tag: sharedTag || ('amux-' + (session || Date.now())), renotify: true, silent: false,
     requireInteraction: true,           // stays on screen until dismissed (desktop)
     data: { session: session || '', card: card || '',
             url: card ? '/#issue=' + encodeURIComponent(card) : (session ? '/#peek=' + encodeURIComponent(session) : '/') },
@@ -6936,6 +6944,16 @@ async function _notifFireNative(title, body, session, card) {
   try {
     if ('serviceWorker' in navigator) {
       const reg = await navigator.serviceWorker.ready;
+      // The server's push for this event already showed: replace it quietly
+      // rather than alerting a second time.
+      if (sharedTag && reg.getNotifications) {
+        try {
+          if ((await reg.getNotifications({ tag: sharedTag })).length) {
+            opts.renotify = false;
+            try { _interactionDiagnostic({ kind: 'notification', verdict: 'notification_merged', notification_kind: 'native', reason: 'push_already_shown', measured: true, n_considered: 1 }); } catch (e) {}
+          }
+        } catch (e) {}
+      }
       await reg.showNotification(title, opts);
       return;
     }
