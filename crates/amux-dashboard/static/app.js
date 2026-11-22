@@ -6831,7 +6831,7 @@ function _notifPush(icon, title, body, session, card, kind) {
   _notifUpdateBadge();
   if (_notifPanelOpen) _notifRenderPanel();
   if (quiet) {
-    try { _interactionDiagnostic({ kind: 'notification', verdict: 'notification_quiet', reason: quiet, notification_kind: kind || '', measured: true, n_considered: 1 }); } catch (e) {}
+    try { _interactionDiagnostic({ kind: 'notification', verdict: 'notification_quiet', reason: quiet, notification_kind: kind || '', measured: true, n_considered: 1 }); } catch (e) { console.warn('amux: notification_quiet diagnostic failed', e); }
     return;
   }
   _notifShowBanner(icon, title, body, session, card);
@@ -6875,7 +6875,7 @@ async function _notifFireNative(title, body, session, card, sharedTag) {
     const now = Date.now();
     if (!_notifSuppressedAt.in_front || now - _notifSuppressedAt.in_front > 60000) {
       _notifSuppressedAt.in_front = now;
-      try { _interactionDiagnostic({ kind: 'notification', verdict: 'notification_suppressed', notification_kind: 'native', reason: 'app_in_front', measured: true, n_considered: 1 }); } catch (e) {}
+      try { _interactionDiagnostic({ kind: 'notification', verdict: 'notification_suppressed', notification_kind: 'native', reason: 'app_in_front', measured: true, n_considered: 1 }); } catch (e) { console.warn('amux: notification_suppressed diagnostic failed', e); }
     }
     return;
   }
@@ -6901,9 +6901,9 @@ async function _notifFireNative(title, body, session, card, sharedTag) {
         try {
           if ((await reg.getNotifications({ tag: sharedTag })).length) {
             opts.renotify = false;
-            try { _interactionDiagnostic({ kind: 'notification', verdict: 'notification_merged', notification_kind: 'native', reason: 'push_already_shown', measured: true, n_considered: 1 }); } catch (e) {}
+            try { _interactionDiagnostic({ kind: 'notification', verdict: 'notification_merged', notification_kind: 'native', reason: 'push_already_shown', measured: true, n_considered: 1 }); } catch (e) { console.warn('amux: notification_merged diagnostic failed', e); }
           }
-        } catch (e) {}
+        } catch (e) { console.warn('amux: could not list shown notifications; alerting normally', e); }
       }
       await reg.showNotification(title, opts);
       return;
@@ -7022,7 +7022,7 @@ async function _pushPresenceBeat(force) {
     _pushPresenceLast = sig;
     await fetch(API + '/api/push/presence', { method: 'POST', keepalive: true,
       headers: _authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body) });
-  } catch (e) { /* offline: the server's report expires on its own */ }
+  } catch (e) { console.warn('amux: presence report not sent (offline?); the server lets it expire', e); }
 }
 ['focus', 'blur', 'pagehide', 'pageshow'].forEach(ev =>
   window.addEventListener(ev, () => _pushPresenceBeat(true), { passive: true }));
