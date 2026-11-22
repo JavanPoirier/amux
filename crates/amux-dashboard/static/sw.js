@@ -86,18 +86,22 @@ self.addEventListener('push', e => {
   let d = {};
   try { d = e.data ? e.data.json() : {}; } catch(_) { d = { title: 'amux', body: e.data ? e.data.text() : '' }; }
   const title = d.title || 'amux';
-  e.waitUntil(self.registration.showNotification(title, {
+  const tag = d.tag || 'amux-push';
+  // The page may already have shown this event under the same tag (a desktop
+  // tab in the background sees a goal met before the server's push lands):
+  // replace it without a second alert. A notification must still be shown.
+  e.waitUntil(self.registration.getNotifications({ tag }).catch(() => []).then(shown => self.registration.showNotification(title, {
     body: d.body || '',
     // The mark without its app-icon background, and a one-colour badge
     // (Android draws the badge from its alpha only, so the full-colour square
     // icon showed as a blank square). iOS ignores both and uses the app icon.
     icon: '/icon-notification-192.png',
     badge: '/icon-badge-96.png',
-    tag: d.tag || 'amux-push',
-    renotify: true,
+    tag,
+    renotify: !shown.length,
     requireInteraction: true,
     data: { url: d.url || '/', session: d.session || '' },
-  }));
+  })));
 });
 
 // Focus the app (or open it) when a notification is tapped — required for the

@@ -2433,3 +2433,18 @@ fn no_model_leads_to_the_window_with_the_subscription_sign_in() {
         "a Cloud server's owner (account_url) gets the first-run window on load"
     );
 }
+
+/// The page's "finished its goal" notification and goal_keeper's web push for
+/// the same event share one tag, so a device that gets both shows one (a
+/// desktop tab in the background got it twice). Renaming either side alone
+/// brings the duplicate back; this names both.
+#[test]
+fn the_goal_met_notification_tag_matches_the_servers_push() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let keeper = std::fs::read_to_string(root.join("src/runtime_jobs/goal_keeper.rs")).unwrap();
+    let app = std::fs::read_to_string(root.join("../amux-dashboard/static/app.js")).unwrap();
+    let sw = std::fs::read_to_string(root.join("../amux-dashboard/static/sw.js")).unwrap();
+    assert!(keeper.contains(r#"&format!("goal-met:{name}")"#), "goal_keeper.rs no longer pushes with tag goal-met:<name>");
+    assert!(app.contains("kind === 'goal' && session ? 'goal-met:' + session"), "app.js no longer tags a goal notification goal-met:<name>");
+    assert!(sw.contains("renotify: !shown.length"), "sw.js no longer replaces an already-shown notification quietly");
+}

@@ -131,3 +131,35 @@ test('the page reports in front / background to the server, which holds pushes f
   expect(res.presence.measured).toBe(true);
   expect(res.presence.in_front).toBeGreaterThanOrEqual(1);
 });
+
+// A desktop browser with amux in a background tab got "finished its goal"
+// twice: once from the page, once from the server's web push. Both now carry
+// the tag goal-met:<worker> (goal_keeper.rs notify_met_once), so the second
+// replaces the first without a second alert.
+test('a goal met already shown by the server push is replaced quietly, not repeated', async ({ page }) => {
+  await page.addInitScript(fakeDevice);
+  await page.addInitScript(() => {
+    const w = window as any;
+    w._shown = [];
+    const reg = {
+      showNotification: async (t: string, o: any) => { w._native.push(t); w._shown.push({ tag: o.tag, renotify: o.renotify }); },
+      getNotifications: async ({ tag }: any) => w._shown.filter((n: any) => n.tag === tag),
+      pushManager: { getSubscription: async () => null },
+    };
+    Object.defineProperty(ServiceWorkerContainer.prototype, 'ready', { configurable: true, get: () => Promise.resolve(reg) });
+  });
+  await page.goto('/');
+  await page.evaluate(() => { (window as any)._front = false; });
+  // First: nothing showing yet, so it alerts.
+  await fire(page, 'w1', 'goal');
+  await expect.poll(() => page.evaluate(() => (window as any)._shown)).toEqual([{ tag: 'goal-met:w1', renotify: true }]);
+  // The server's push for w2 is already on screen under its tag: the page's
+  // own notification replaces it with no second alert.
+  await page.evaluate(() => { (window as any)._shown.push({ tag: 'goal-met:w2', renotify: true }); });
+  await fire(page, 'w2', 'goal');
+  await expect.poll(() => page.evaluate(() => (window as any)._shown.length)).toBe(3);
+  expect(await page.evaluate(() => (window as any)._shown[2])).toEqual({ tag: 'goal-met:w2', renotify: false });
+  // Other kinds keep their own per-worker tag.
+  await fire(page, 'w1', 'stopped');
+  await expect.poll(() => page.evaluate(() => (window as any)._shown[3]?.tag)).toBe('amux-w1');
+});
