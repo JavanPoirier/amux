@@ -6297,3 +6297,14 @@ CARD: AF-1408
 SYMPTOM: decomp-platform's `amux land` on mixpeek-dev (pid 3822027) held the main lock 19:52Z to 20:47Z. After merge-queue run 45693595861 refused its batch, the process tree was only `sleep 20`, `--status` read "current attempt 0 min" on every read, and 14 lands queued behind it until the owner cancelled it. The holder's log shows the mechanism. Its bisect handed the lease to the Mac after a green step, the Mac landed, the 4-of-7 green prefix could not be carried onto the moved main (mq_carry_changes_members) and was dropped, and the holder handed over again and waited on the Mac's land.
 COST: about 55 min of main for every mixpeek-dev lane, 40 min of candidate runs that landed nothing, and a manual cancel by the owner.
 FIX: c45cdf3e5 (a bisect keeps the lease once a step ran green). The misleading --status is AF-1409.
+
+## The land gate's e2e leg serves the live local dashboard, not the change under test, on a machine whose server.env sets AMUX_DASHBOARD_DIR
+AREA: gates
+SEVERITY: blocks
+STATUS: open
+DATE: 2026-11-22
+SESSION: pwa-push-prefs
+CARD: none (board off for this worker; file one on amux-frustrations)
+SYMPTOM: `scripts/land_gate.py` failed 8 of 8 tests in a new dashboard spec (e2e/notif-background-only.spec.ts) that passed 12/12 run by hand. The webServer log read "DASHBOARD: served from AMUX_DASHBOARD_DIR=/Users/javan/.amux/dashboard-local/crates/amux-dashboard/static, NOT the binary's embedded copy". `~/.amux/server.env` sets AMUX_DASHBOARD_DIR and lists it in AMUX_ENV_FROM_FILE, so every worker's shell inherits it from the tmux environment, `playwright()` in land_gate.py copies os.environ, and e2e/serve-head.sh passes the variable through.
+COST: about 25 minutes reading the gate and serve-head.sh. Worse for others: on this Mac every lane's gate tests the LIVE dashboard, so a new spec can only fail, and a dashboard regression in an existing spec passes the gate unseen.
+FIX: in land_gate.py `playwright()`, set `env["AMUX_DASHBOARD_DIR"] = os.path.join(tree, "crates/amux-dashboard/static")` (the composed tree's own bytes), or pop it. land_gate.py is [owner] tier, so the change waits for the owner. Workaround: `env -u AMUX_DASHBOARD_DIR python3 scripts/land_gate.py`.
