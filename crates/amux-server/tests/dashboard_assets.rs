@@ -2379,6 +2379,10 @@ fn every_notification_emitter_goes_through_the_shared_gate() {
         // check that makes this device's push subscription match it. Both keep
         // the switch itself in step and raise nothing (2eb8f94ce).
         "_notifDesktopState", "_pushReconcile",
+        // Reports "this device has amux in front" to the server so it holds
+        // web pushes back; with the switch off there is nothing to hold, and
+        // it raises nothing itself (push/mod.rs presence).
+        "_pushPresenceBeat",
     ];
     let mut current = String::from("<top level>");
     let mut offenders = Vec::new();

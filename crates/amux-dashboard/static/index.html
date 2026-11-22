@@ -665,9 +665,17 @@ setTimeout(function(){document.documentElement.classList.remove('boot-peek-pendi
             <label class="theme-toggle"><input type="checkbox" id="notif-device-native-cb" aria-label="Notifications on this device" onchange="_notifToggleNative()"><span class="theme-track"><span class="theme-thumb"></span></span></label>
           </div>
           <div class="settings-row" style="justify-content:space-between;align-items:center;margin-top:var(--space-1);">
+            <span style="font-size:var(--fs-lg);">Only when amux is in the background</span>
+            <label class="theme-toggle"><input type="checkbox" id="notif-device-bgonly-cb" aria-label="Only when amux is in the background" onchange="_notifToggleBgOnly()"><span class="theme-track"><span class="theme-thumb"></span></span></label>
+          </div>
+          <div class="ui-help" style="margin-top:var(--space-1);">While amux is open and in front you get in-app pop-ups instead, and nothing pops up for the worker you are looking at.</div>
+          <div class="settings-row" style="justify-content:space-between;align-items:center;margin-top:var(--space-1);">
             <span style="font-size:var(--fs-lg);">In-app pop-ups</span>
             <label class="theme-toggle"><input type="checkbox" id="notif-device-banner-cb" aria-label="In-app pop-ups" onchange="_notifToggleBanners()"><span class="theme-track"><span class="theme-thumb"></span></span></label>
           </div>
+          <div style="font-weight:600;font-size:var(--fs-md);margin:var(--space-3) 0 var(--space-1);">Notify me when a worker</div>
+          <div id="notif-kinds-list" class="notif-kinds-list"></div>
+          <div class="ui-help" style="margin-top:var(--space-1);">Unchecked ones still appear in the bell list, without a pop-up or a device notification.</div>
         </div>
         <div class="settings-sep"></div>
         <div class="settings-section">

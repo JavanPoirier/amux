@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="80 80 864 864" width="864" height="864">
+  <!-- Monochrome amux mark for the notification badge: Android draws the
+       badge from its alpha channel only, so a full-colour square icon shows as
+       a white square in the status bar. -->
+  <defs>
+    <mask id="barCut" maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024">
+      <rect width="1024" height="1024" fill="#fff"/>
+      <line x1="278" y1="600" x2="746" y2="600" stroke="#000" stroke-width="96" stroke-linecap="round"/>
+    </mask>
+  </defs>
+  <g stroke="#fff" stroke-linecap="round" fill="none">
+    <g mask="url(#barCut)">
+      <line x1="512" y1="170" x2="185" y2="830" stroke-width="84"/>
+      <line x1="512" y1="170" x2="839" y2="830" stroke-width="84"/>
+    </g>
+    <line x1="278" y1="600" x2="746" y2="600" stroke-width="72"/>
+  </g>
+</svg>

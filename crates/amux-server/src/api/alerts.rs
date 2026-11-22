@@ -173,9 +173,12 @@ pub(crate) fn push_delivery_verdict(results: &[Value]) -> Result<(), String> {
     if results.is_empty() {
         return Err("no push subscriptions — nobody is registered to receive it".into());
     }
-    let delivered = results.iter().any(
-        |r| matches!(r.get("status").and_then(Value::as_u64), Some(s) if (200..300).contains(&s)),
-    );
+    // A push held back because that device has amux in front reached the owner
+    // in the app (push/mod.rs presence), so it is not a delivery failure.
+    let delivered = results.iter().any(|r| {
+        matches!(r.get("status").and_then(Value::as_u64), Some(s) if (200..300).contains(&s))
+            || r.get("skipped").and_then(Value::as_str) == Some("foreground")
+    });
     if !delivered {
         return Err(format!(
             "push not delivered — {} subscription(s), 0 accepted (all rejected/expired)",
@@ -1522,6 +1525,13 @@ mod tests {
             push_delivery_verdict(&[row(429), row(429)]).is_err(),
             "'we called send' is not delivery"
         );
+
+        // A push held back because the device has amux in front reached the
+        // owner in the app; any other zero-status row is still a failure.
+        let held = json!({"host":"web.push.apple.com","status":0,"skipped":"foreground","detail":"device_in_foreground"});
+        assert!(push_delivery_verdict(&[held, row(410)]).is_ok());
+        let failed = json!({"host":"web.push.apple.com","status":0,"detail":"transport error: x"});
+        assert!(push_delivery_verdict(&[failed]).is_err());
     }
 
     /// MF-427. The guard was correct and its STATE was fiction: the in-memory

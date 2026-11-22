@@ -1,5 +1,5 @@
 const CACHE = 'amux-v__AMUX_ASSET_VER__';   // same derived hash as APP_VER, stamped at serve time
-const SHELL_URLS = ['/', '/state/kernel.js', '/state/control-registry.json', '/vendor/md.js', '/state/feedback.css', '/manifest.json', '/icon.svg', '/icon.png', '/icon-192.png', '/icon-512.png'];
+const SHELL_URLS = ['/', '/state/kernel.js', '/state/control-registry.json', '/vendor/md.js', '/state/feedback.css', '/manifest.json', '/icon.svg', '/icon.png', '/icon-192.png', '/icon-512.png', '/icon-notification-192.png', '/icon-badge-96.png'];
 
 // Every CDN library and stylesheet index.html loads. Pre-cached one by one at
 // install so the WHOLE app works offline, including features not opened yet
@@ -88,8 +88,11 @@ self.addEventListener('push', e => {
   const title = d.title || 'amux';
   e.waitUntil(self.registration.showNotification(title, {
     body: d.body || '',
-    icon: '/icon-192.png',
-    badge: '/icon-192.png',
+    // The mark without its app-icon background, and a one-colour badge
+    // (Android draws the badge from its alpha only, so the full-colour square
+    // icon showed as a blank square). iOS ignores both and uses the app icon.
+    icon: '/icon-notification-192.png',
+    badge: '/icon-badge-96.png',
     tag: d.tag || 'amux-push',
     renotify: true,
     requireInteraction: true,

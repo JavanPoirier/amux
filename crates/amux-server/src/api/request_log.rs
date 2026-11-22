@@ -4207,6 +4207,10 @@ pub const ROUTE_TABLE: &[RouteEntry] = &[
         methods: &["GET"],
     },
     RouteEntry {
+        path: "/api/push/presence",
+        methods: &["POST"],
+    },
+    RouteEntry {
         path: "/api/dictation/history",
         methods: &["GET"],
     },
