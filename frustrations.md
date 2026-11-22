@@ -6274,3 +6274,14 @@ SYMPTOM: At 20:00:05 ET the desktop worker ran `colima delete` on mixpeek-hikes,
 COST: about 30 minutes to rebuild, plus run state that cannot be recovered.
 MECHANISM: the desktop worker's own ask recommended only goal-shared and gs12-local, said it could not tell which worker owns each VM, and asked for a yes; the owner's reply named all three. No record links a VM to its lane or a stop to its reason, so neither the owner nor the worker could see mixpeek-hikes was backend's and paused, not abandoned. mac-cleanup-tick.sh never deletes a VM.
 FIX: record a VM's owning lane at creation and each stop's reason; before deleting a VM another lane owns, show its owner, last use and data size, and snapshot its data volume or ask that lane. A guard refusing `colima delete` of an owned VM is a boundaries.toml change for the owner.
+
+## The land gate's e2e leg serves the live local dashboard, not the change under test, on a machine whose server.env sets AMUX_DASHBOARD_DIR
+AREA: gates
+SEVERITY: blocks
+STATUS: open
+DATE: 2026-11-22
+SESSION: pwa-push-prefs
+CARD: none (board off for this worker; file one on amux-frustrations)
+SYMPTOM: `scripts/land_gate.py` failed 8 of 8 tests in a new dashboard spec (e2e/notif-background-only.spec.ts) that passed 12/12 run by hand. The webServer log read "DASHBOARD: served from AMUX_DASHBOARD_DIR=/Users/javan/.amux/dashboard-local/crates/amux-dashboard/static, NOT the binary's embedded copy". `~/.amux/server.env` sets AMUX_DASHBOARD_DIR and lists it in AMUX_ENV_FROM_FILE, so every worker's shell inherits it from the tmux environment, `playwright()` in land_gate.py copies os.environ, and e2e/serve-head.sh passes the variable through.
+COST: about 25 minutes reading the gate and serve-head.sh. Worse for others: on this Mac every lane's gate tests the LIVE dashboard, so a new spec can only fail, and a dashboard regression in an existing spec passes the gate unseen.
+FIX: in land_gate.py `playwright()`, set `env["AMUX_DASHBOARD_DIR"] = os.path.join(tree, "crates/amux-dashboard/static")` (the composed tree's own bytes), or pop it. land_gate.py is [owner] tier, so the change waits for the owner. Workaround: `env -u AMUX_DASHBOARD_DIR python3 scripts/land_gate.py`.
