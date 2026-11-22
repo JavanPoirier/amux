@@ -6692,6 +6692,51 @@ if (_notifDesktopPrefs()) {
   try { _notifDesktopPrefs().postMessage({ op: 'get' }); } catch (e) { console.warn('amux: could not ask the app for its notification switch', e); }
 }
 let _notifBanners = localStorage.getItem('amux_notif_banners') !== '0';  // in-app pop-ups, default on
+// Device notifications only while amux is NOT in front (default on). In front,
+// the in-app pop-up already shows the event, so a lock-screen notification is
+// noise (owner, 2026-11-22). Covers both the page's own notifications and the
+// server's web pushes, via the presence report below.
+let _notifBgOnly = localStorage.getItem('amux_notif_bg_only') !== '0';
+// What this device notifies about. A muted kind still lands in the bell list,
+// read, but raises no pop-up and no device notification. "Started working" is
+// off by default: a worker starting is the expected result of what you just did.
+const _NOTIF_KINDS = [
+  { key: 'needs_input', label: 'Needs input or is waiting' },
+  { key: 'blocked',     label: 'Blocked on a permission prompt' },
+  { key: 'finished',    label: 'Finished a task' },
+  { key: 'goal',        label: 'Met its goal' },
+  { key: 'stopped',     label: 'Stopped' },
+  { key: 'started',     label: 'Started working', off: true },
+  { key: 'activity',    label: 'Gets an automatic action (schedule, compaction, restart)' },
+];
+let _notifKindPrefs = {};
+try { _notifKindPrefs = JSON.parse(localStorage.getItem('amux_notif_kinds') || '{}') || {}; } catch (e) { _notifKindPrefs = {}; }
+function _notifKindOn(kind) {
+  if (!kind) return true;
+  if (kind in _notifKindPrefs) return !!_notifKindPrefs[kind];
+  const k = _NOTIF_KINDS.find(x => x.key === kind);
+  return !(k && k.off);
+}
+function _notifSetKind(kind, on) {
+  _notifKindPrefs[kind] = !!on;
+  localStorage.setItem('amux_notif_kinds', JSON.stringify(_notifKindPrefs));
+  const k = _NOTIF_KINDS.find(x => x.key === kind);
+  showToast((k ? k.label : kind) + ': ' + (on ? 'notify' : 'muted'));
+}
+function _notifRenderKinds() {
+  const box = document.getElementById('notif-kinds-list');
+  if (!box) return;
+  box.innerHTML = _NOTIF_KINDS.map(k =>
+    '<label class="notif-kind-row"><input type="checkbox" data-notif-kind="' + k.key + '"'
+    + (_notifKindOn(k.key) ? ' checked' : '') + ' onchange="_notifSetKind(this.dataset.notifKind,this.checked)">'
+    + '<span>' + esc(k.label) + '</span></label>').join('');
+}
+// "In front" means a person is looking at this window: visible AND focused. A
+// visible desktop window behind another app is not in front.
+function _amuxInFront() {
+  if (document.visibilityState !== 'visible') return false;
+  try { return typeof document.hasFocus !== 'function' || document.hasFocus(); } catch (e) { return true; }
+}
 let _notifItems = JSON.parse(localStorage.getItem('amux_notif_items') || '[]').slice(0, 100);
 let _notifUnread = _notifItems.filter(n => !n.read).length;
 let _notifPanelOpen = false;
@@ -6770,12 +6815,26 @@ function _notifShowBanner(icon, title, body, session, card) {
   if (container.children.length > 4) container.firstElementChild.remove();
 }
 
-function _notifPush(icon, title, body, session, card) {
-  _notifItems.unshift({ icon, title, body, session: session || '', card: card || '', ts: Date.now(), read: false });
+// Why this notification should stay quiet (only the bell list records it), or
+// '' to raise it. Muted kind, or the worker it is about is the one open in
+// front of you: you are watching it start or stop, a pop-up adds nothing.
+function _notifQuietReason(session, kind) {
+  if (!_notifKindOn(kind)) return 'kind_muted';
+  if (session && typeof peekSession !== 'undefined' && peekSession === session && _amuxInFront()) return 'viewing_worker';
+  return '';
+}
+
+function _notifPush(icon, title, body, session, card, kind) {
+  const quiet = _notifQuietReason(session, kind);
+  _notifItems.unshift({ icon, title, body, session: session || '', card: card || '', ts: Date.now(), read: !!quiet });
   _notifSave();
   _notifUpdateBadge();
-  _notifShowBanner(icon, title, body, session, card);
   if (_notifPanelOpen) _notifRenderPanel();
+  if (quiet) {
+    try { _interactionDiagnostic({ kind: 'notification', verdict: 'notification_quiet', reason: quiet, notification_kind: kind || '', measured: true, n_considered: 1 }); } catch (e) {}
+    return;
+  }
+  _notifShowBanner(icon, title, body, session, card);
   _notifFireNative(title, body, session, card);
 }
 
@@ -6802,12 +6861,22 @@ function _notifClaimOnce(sig) {
 async function _notifFireNative(title, body, session, card) {
   if (!amuxNotifyAllowed('native')) return;
   if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
+  // In front, the in-app pop-up is the notification (when pop-ups are off, the
+  // bell list still has it). Reported once a minute like any suppression.
+  if (_notifBgOnly && _amuxInFront()) {
+    const now = Date.now();
+    if (!_notifSuppressedAt.in_front || now - _notifSuppressedAt.in_front > 60000) {
+      _notifSuppressedAt.in_front = now;
+      try { _interactionDiagnostic({ kind: 'notification', verdict: 'notification_suppressed', notification_kind: 'native', reason: 'app_in_front', measured: true, n_considered: 1 }); } catch (e) {}
+    }
+    return;
+  }
   if (!(await _notifClaimOnce(title + '|' + (body || '') + '|' + (session || '')))) {
     try { amuxTrack('notif_native_deduped', { measured: true, n_considered: 1 }); } catch (e) {}
     return;
   }
   const opts = {
-    body, icon: '/icon-192.png', badge: '/icon-192.png',
+    body, icon: '/icon-notification-192.png', badge: '/icon-badge-96.png',   // same as sw.js push
     tag: 'amux-' + (session || Date.now()), renotify: true, silent: false,
     requireInteraction: true,           // stays on screen until dismissed (desktop)
     data: { session: session || '', card: card || '',
@@ -6866,6 +6935,7 @@ async function _pushSubscribe() {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ endpoint: j.endpoint, keys: j.keys }),
     });
+    _pushPresenceEndpoint = sub.endpoint;
     return { ok: true, endpoint: sub.endpoint };
   } catch (e) {
     return { ok: false, reason: e.message };
@@ -6886,6 +6956,7 @@ async function _pushUnsubscribe() {
       body: JSON.stringify({ endpoint: sub.endpoint }),
     });
   } catch (e) { console.warn('amux: push unsubscribe did not reach the server; the device drops it anyway', e); }
+  _pushPresenceEndpoint = null;
   if (!sub) return false;
   try { await sub.unsubscribe(); return true; } catch (e) { return false; }
 }
@@ -6907,6 +6978,51 @@ async function _pushReconcile() {
   }
 }
 setTimeout(_pushReconcile, 6000);
+
+// Tell the server whether this device has amux in front, so it holds web
+// pushes back while you are looking at the app (push/mod.rs presence). Sent on
+// every visibility and focus change, and every 15s while in front; the server
+// forgets a report after 35s, so a page killed in front gets pushes again.
+let _pushPresenceEndpoint = null;
+let _pushPresenceLast = '';
+async function _pushPresenceBeat(force) {
+  if (!_notifsNative || _notifDesktopPrefs() || _notifInOlderApp()) return;
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
+  try {
+    if (!_pushPresenceEndpoint) {
+      const sub = await (await _swReady(8000)).pushManager.getSubscription();
+      if (!sub) return;
+      _pushPresenceEndpoint = sub.endpoint;
+    }
+    const front = _amuxInFront();
+    const body = { endpoint: _pushPresenceEndpoint, foreground: front, background_only: _notifBgOnly,
+      viewing: (typeof peekSession !== 'undefined' && peekSession) || '' };
+    const sig = front + '|' + _notifBgOnly + '|' + body.viewing;
+    // In the background only a CHANGE is worth sending; in front the beat keeps
+    // the report from expiring.
+    if (!force && !front && sig === _pushPresenceLast) return;
+    _pushPresenceLast = sig;
+    await fetch(API + '/api/push/presence', { method: 'POST', keepalive: true,
+      headers: _authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body) });
+  } catch (e) { /* offline: the server's report expires on its own */ }
+}
+['focus', 'blur', 'pagehide', 'pageshow'].forEach(ev =>
+  window.addEventListener(ev, () => _pushPresenceBeat(true), { passive: true }));
+document.addEventListener('visibilitychange', () => _pushPresenceBeat(true), { passive: true });
+setInterval(() => { if (_amuxInFront()) _pushPresenceBeat(true); }, 15000);
+setTimeout(() => _pushPresenceBeat(true), 7000);
+
+function _notifToggleBgOnly() {
+  _notifBgOnly = !_notifBgOnly;
+  localStorage.setItem('amux_notif_bg_only', _notifBgOnly ? '1' : '0');
+  _notifUpdateBgOnlyBtn();
+  _pushPresenceBeat(true);
+  showToast(_notifBgOnly ? 'Device notifications only when amux is in the background' : 'Device notifications even while amux is open');
+}
+function _notifUpdateBgOnlyBtn() {
+  const cb = document.getElementById('notif-device-bgonly-cb');
+  if (cb) cb.checked = _notifBgOnly;
+}
 
 // Step-by-step on-device diagnostic. Uses alert() so the full report is
 // readable on a phone (toasts truncate). Leads with the iOS Home-Screen fix,
@@ -7037,7 +7153,7 @@ function _notifUpdateBannerBtn() {
 }
 
 // The Settings switches show the device's state from the first paint.
-setTimeout(() => { _notifUpdateNativeBtn(); _notifUpdateBannerBtn(); }, 0);
+setTimeout(() => { _notifUpdateNativeBtn(); _notifUpdateBannerBtn(); _notifUpdateBgOnlyBtn(); _notifRenderKinds(); }, 0);
 
 function toggleNotifPanel() {
   _notifPanelOpen = !_notifPanelOpen;
@@ -7195,7 +7311,7 @@ function _needsYouRenderPanel() {
   setInterval(_needsYouFetch, 5 * 60 * 1000);
 })();
 
-function _fireSessionNotif(name, title, body) {
+function _fireSessionNotif(name, title, body, kind) {
   // Home speaks in requests and results, not in which worker started what
   // (a "family-admin started working" pop-up confused the second Dana run).
   if (document.body.classList.contains('intent-simple')) return;
@@ -7204,7 +7320,7 @@ function _fireSessionNotif(name, title, body) {
   else if (title.includes('stopped')) icon = '⏹';
   else if (title.includes('started')) icon = '▶️';
   else if (title.includes('finished')) icon = '✅';
-  _notifPush(icon, title, body || '', name);
+  _notifPush(icon, title, body || '', name, '', kind);
 }
 
 const _ALERT_LABELS = {
@@ -7222,7 +7338,7 @@ function _fireAmuxAlert(a) {
   if (!fn) return;
   const { icon, title, body } = fn(a);
   const card = a.card || a.card_id || a.issue || a.issue_id || '';
-  _notifPush(icon, title, body, a.session || '', /^[A-Za-z0-9_-]+$/.test(card) ? card : '');
+  _notifPush(icon, title, body, a.session || '', /^[A-Za-z0-9_-]+$/.test(card) ? card : '', 'activity');
 }
 
 let _transitionsCheckedAt = 0;
@@ -7244,25 +7360,25 @@ function _checkSessionTransitions(newData) {
     if (!prev) { _prevSessionState[s.name] = { status: s.status, running: s.running, goal: s.goal?.state }; continue; }
     // A /goal reaching met is the finish line a described outcome runs to.
     if (s.goal?.state === 'met' && prev.goal && prev.goal !== 'met') {
-      _fireSessionNotif(s.name, s.name + ' finished its goal', s.goal.condition || s.task_name || '');
+      _fireSessionNotif(s.name, s.name + ' finished its goal', s.goal.condition || s.task_name || '', 'goal');
     }
     const statusChanged = s.status !== prev.status;
     const stoppedNow = prev.running && !s.running;
     if (statusChanged) {
       if (s.status === 'blocked') {
-        _fireSessionNotif(s.name, s.name + ' blocked on permission', s.task_name || 'Waiting on a permission dialog');
+        _fireSessionNotif(s.name, s.name + ' blocked on permission', s.task_name || 'Waiting on a permission dialog', 'blocked');
         amuxTrack('session_blocked', { session: s.name, task: s.task_name || '' });
       } else if (s.status === 'waiting' && s.waiting_reason !== 'rate_limit') {
-        _fireSessionNotif(s.name, s.name + ' ' + _waitingLabel(s), s.task_name || 'Worker is waiting');
+        _fireSessionNotif(s.name, s.name + ' ' + _waitingLabel(s), s.task_name || 'Worker is waiting', 'needs_input');
         amuxTrack('session_waiting', { session: s.name, task: s.task_name || '', auto_continue: !!s.auto_continue });
       } else if (s.status === 'active' && prev.status !== 'active') {
-        _fireSessionNotif(s.name, s.name + ' started working', s.task_name || '');
+        _fireSessionNotif(s.name, s.name + ' started working', s.task_name || '', 'started');
       } else if (s.status === 'idle' && prev.status === 'active') {
-        _fireSessionNotif(s.name, s.name + ' finished', s.task_name || 'Task completed');
+        _fireSessionNotif(s.name, s.name + ' finished', s.task_name || 'Task completed', 'finished');
       }
     }
     if (stoppedNow && prev.status !== '') {
-      _fireSessionNotif(s.name, s.name + ' stopped', '');
+      _fireSessionNotif(s.name, s.name + ' stopped', '', 'stopped');
       amuxTrack('session_stopped', { session: s.name, prev_status: prev.status });
     }
     _prevSessionState[s.name] = { status: s.status, running: s.running, goal: s.goal?.state };
@@ -75309,7 +75425,7 @@ async function _cvMaybeNotify(ev) {
   } catch (e) {}
   try {
     if ('Notification' in window && Notification.permission === 'granted' && document.hidden) {
-      const n = new Notification(title, { body, tag: 'conv-' + ev.conv, icon: '/icon-192.png' });
+      const n = new Notification(title, { body, tag: 'conv-' + ev.conv, icon: '/icon-notification-192.png', badge: '/icon-badge-96.png' });
       n.onclick = () => { window.focus(); location.hash = url; };
     }
   } catch (e) {}

@@ -3792,6 +3792,12 @@
       "target": "control-or-request",
       "queue_policy": "transport-declared"
     },
+    "_notifToggleBgOnly": {
+      "kind": "command._notifToggleBgOnly",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
     "_notifToggleNative": {
       "kind": "command._notifToggleNative",
       "feedback_required": true,
@@ -4826,6 +4832,12 @@
     },
     "_pushChipsNow": {
       "kind": "command._pushChipsNow",
+      "feedback_required": true,
+      "target": "control-or-request",
+      "queue_policy": "transport-declared"
+    },
+    "_pushPresenceBeat": {
+      "kind": "command._pushPresenceBeat",
       "feedback_required": true,
       "target": "control-or-request",
       "queue_policy": "transport-declared"

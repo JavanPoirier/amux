@@ -254,6 +254,109 @@ struct SubRow {
     auth: String,
 }
 
+// ---- foreground presence ----------------------------------------------------
+//
+// A device whose amux window is in front already shows the event in the app,
+// so a lock-screen push to it is noise (owner, 2026-11-22: "I do want push
+// notifications if the app is put in the background, not while I'm actively in
+// it"). The page reports its state to POST /api/push/presence: on every
+// visibility or focus change, and every PRESENCE_HEARTBEAT while in front. The
+// skip is decided here, not in the service worker, because a push the worker
+// receives and does not display counts against the subscription (WebKit
+// revokes it after a few), so a device in front must not be sent one at all.
+//
+// The report expires: a page killed while in front (iOS suspends without
+// running `visibilitychange` sometimes) stops heartbeating, and after
+// PRESENCE_TTL the device gets pushes again. In memory only: after a server
+// restart every device gets pushes until its page reports again, which errs
+// toward notifying.
+
+/// How long a "this device is in front" report counts. The page heartbeats
+/// every 15s (`_pushPresenceBeat` in app.js), so two missed beats expire it.
+pub const PRESENCE_TTL: std::time::Duration = std::time::Duration::from_secs(35);
+
+/// Tags that always reach every device: the fire alarm, and the push test
+/// the owner runs from inside the app (which is, by definition, in front).
+const ALWAYS_DELIVER_TAGS: &[&str] = &["urgent", "amux-push-test"];
+
+#[derive(Clone, Debug)]
+struct Presence {
+    seen: std::time::Instant,
+    foreground: bool,
+    /// The device's own switch, "Only when amux is in the background".
+    background_only: bool,
+    /// The worker the page has open, for the log line only.
+    viewing: String,
+}
+
+static PRESENCE: LazyLock<std::sync::Mutex<std::collections::HashMap<String, Presence>>> =
+    LazyLock::new(Default::default);
+
+/// Counters for GET /api/push/subscriptions: how many pushes were held back
+/// because the device was in front, and how many were sent.
+static SKIPPED_FOREGROUND: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static SENT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Why this push should not go to `endpoint`, or None to send it. Pure over
+/// the presence map so the expiry is testable without a clock.
+fn foreground_skip(
+    map: &std::collections::HashMap<String, Presence>,
+    endpoint: &str,
+    tag: &str,
+    now: std::time::Instant,
+) -> Option<String> {
+    if ALWAYS_DELIVER_TAGS.contains(&tag) {
+        return None;
+    }
+    let p = map.get(endpoint)?;
+    if !p.foreground || !p.background_only {
+        return None;
+    }
+    if now.saturating_duration_since(p.seen) > PRESENCE_TTL {
+        return None;
+    }
+    Some(if p.viewing.is_empty() {
+        "device_in_foreground".into()
+    } else {
+        format!("device_in_foreground viewing={}", p.viewing)
+    })
+}
+
+fn record_presence(endpoint: String, p: Presence) {
+    let mut map = PRESENCE.lock().unwrap_or_else(|e| e.into_inner());
+    // Bounded: drop reports far past their TTL so the map tracks live devices.
+    let now = std::time::Instant::now();
+    map.retain(|_, v| now.saturating_duration_since(v.seen) < PRESENCE_TTL * 20);
+    map.insert(endpoint, p);
+}
+
+async fn presence(Json(body): Json<Value>) -> Response {
+    let endpoint = body
+        .get("endpoint")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if endpoint.is_empty() || endpoint.len() > 2048 {
+        return err(StatusCode::BAD_REQUEST, json!({ "error": "endpoint required" }));
+    }
+    let p = Presence {
+        seen: std::time::Instant::now(),
+        foreground: body.get("foreground").and_then(Value::as_bool).unwrap_or(false),
+        background_only: body.get("background_only").and_then(Value::as_bool).unwrap_or(true),
+        viewing: body
+            .get("viewing")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .chars()
+            .take(80)
+            .collect(),
+    };
+    let fg = p.foreground;
+    record_presence(endpoint, p);
+    Json(json!({ "ok": true, "foreground": fg, "ttl_s": PRESENCE_TTL.as_secs() })).into_response()
+}
+
 /// Send to every subscription; prune dead (404/410) ones like the Python
 /// server does. Returns per-endpoint {host, status, detail}.
 pub async fn send_all(
@@ -308,6 +411,18 @@ pub async fn send_all(
             .ok()
             .and_then(|u| u.host_str().map(str::to_string))
             .unwrap_or_default();
+        let skip = {
+            let map = PRESENCE.lock().unwrap_or_else(|e| e.into_inner());
+            foreground_skip(&map, &sub.endpoint, tag, std::time::Instant::now())
+        };
+        if let Some(reason) = skip {
+            SKIPPED_FOREGROUND.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tracing::info!(host = %host, tag, reason = %reason, verdict = "push_skipped_foreground",
+                measured = true, n_considered = 1, "web push held back: the device has amux in front");
+            results.push(json!({ "host": host, "status": 0, "skipped": "foreground", "detail": reason }));
+            continue;
+        }
+        SENT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (status, detail) =
             send_one_push(&vapid, &sub.endpoint, &sub.p256dh, &sub.auth, &payload).await;
         if status == 404 || status == 410 {
@@ -344,6 +459,7 @@ pub fn routes() -> Router<AppState> {
         .route("/unsubscribe", post(unsubscribe))
         .route("/test", post(test_push))
         .route("/subscriptions", get(subscriptions))
+        .route("/presence", post(presence))
 }
 
 fn err(status: StatusCode, body: Value) -> Response {
@@ -519,8 +635,25 @@ async fn subscriptions(State(state): State<AppState>) -> Response {
                     json!({ "host": host, "ua": ua.chars().take(120).collect::<String>(), "created": created })
                 })
                 .collect();
-            Json(json!({ "count": subs.len(), "subject": vapid_subject(), "subscriptions": subs }))
-                .into_response()
+            let (in_front, reporting) = {
+                let map = PRESENCE.lock().unwrap_or_else(|e| e.into_inner());
+                let now = std::time::Instant::now();
+                let live: Vec<&Presence> =
+                    map.values().filter(|p| now.saturating_duration_since(p.seen) <= PRESENCE_TTL).collect();
+                (live.iter().filter(|p| p.foreground).count(), live.len())
+            };
+            Json(json!({
+                "count": subs.len(), "subject": vapid_subject(), "subscriptions": subs,
+                // Since this server started: pushes sent, and pushes held back
+                // because the device had amux in front (push/mod.rs presence).
+                "presence": {
+                    "measured": true, "n_considered": reporting, "in_front": in_front,
+                    "ttl_s": PRESENCE_TTL.as_secs(),
+                    "sent": SENT.load(std::sync::atomic::Ordering::Relaxed),
+                    "skipped_foreground": SKIPPED_FOREGROUND.load(std::sync::atomic::Ordering::Relaxed),
+                },
+            }))
+            .into_response()
         }
         Ok(Err(e)) => err(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -735,5 +868,42 @@ mod tests {
             let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600, "private key file mode");
         }
+    }
+
+    fn present(foreground: bool, background_only: bool, age_s: u64, now: std::time::Instant) -> Presence {
+        Presence {
+            seen: now - std::time::Duration::from_secs(age_s),
+            foreground,
+            background_only,
+            viewing: "w1".into(),
+        }
+    }
+
+    #[test]
+    fn a_device_in_front_is_skipped_until_its_report_expires() {
+        let now = std::time::Instant::now() + std::time::Duration::from_secs(600);
+        let mut map = std::collections::HashMap::new();
+        map.insert("https://push/a".to_string(), present(true, true, 5, now));
+        let why = foreground_skip(&map, "https://push/a", "goal-met", now);
+        assert_eq!(why.as_deref(), Some("device_in_foreground viewing=w1"));
+        // Another device, with no report, still gets it.
+        assert_eq!(foreground_skip(&map, "https://push/b", "goal-met", now), None);
+        // A report older than the TTL no longer counts: a killed page notifies again.
+        map.insert("https://push/a".to_string(), present(true, true, PRESENCE_TTL.as_secs() + 1, now));
+        assert_eq!(foreground_skip(&map, "https://push/a", "goal-met", now), None);
+    }
+
+    #[test]
+    fn background_pages_the_off_switch_and_urgent_tags_always_send() {
+        let now = std::time::Instant::now() + std::time::Duration::from_secs(600);
+        let mut map = std::collections::HashMap::new();
+        map.insert("e".to_string(), present(false, true, 1, now));
+        assert_eq!(foreground_skip(&map, "e", "x", now), None, "a page in the background gets pushes");
+        map.insert("e".to_string(), present(true, false, 1, now));
+        assert_eq!(foreground_skip(&map, "e", "x", now), None, "background-only switched off");
+        map.insert("e".to_string(), present(true, true, 1, now));
+        assert_eq!(foreground_skip(&map, "e", "urgent", now), None, "the fire alarm always sends");
+        assert_eq!(foreground_skip(&map, "e", "amux-push-test", now), None, "the in-app test always sends");
+        assert!(foreground_skip(&map, "e", "conv-x", now).is_some());
     }
 }
