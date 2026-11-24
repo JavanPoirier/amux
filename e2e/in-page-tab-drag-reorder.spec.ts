@@ -1,11 +1,12 @@
 import {test, expect} from './fixtures';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 
 // Owner, 2026-11-23: "Dragging to order tabs in Amux on the web is not
 // working." The in-page tab strip ("Tab 1", "Tab 2", +) never had a drag; only
-// the ⊞ menus did. A tab now drags along the strip with the pointer. The first
-// tab is the page itself and later tabs are iframes, so a drop that puts
-// another tab first moves the page to that tab's address and list view, and
-// the tab that was first keeps its own.
+// the ⊞ menus did. A tab now drags along the strip with the pointer. One tab
+// is the page itself and the others are iframes; a drop only moves labels.
 const WORKERS = [
   {name: 'alpha-one', running: true, status: 'idle', dir: '/tmp'},
   {name: 'beta-two', running: true, status: 'idle', dir: '/tmp'},
@@ -35,6 +36,8 @@ async function dragTab(page: any, fromId: number, toId: number, midway?: () => P
     if (i === 8 && midway) await midway();
   }
   await page.mouse.up();
+  // A click within 400ms of a drop is the drop's own and is swallowed.
+  await page.waitForTimeout(450);
 }
 
 // On a phone the strip is not shown at all, so the drag adds nothing there.
@@ -44,6 +47,34 @@ test('a phone shows no tab strip to drag', async ({page}, testInfo) => {
   await page.waitForFunction("typeof _chromeAddTab === 'function'");
   await expect(page.locator('#chrome-tabs-bar')).toBeHidden();
   expect(await page.evaluate("getComputedStyle(document.documentElement).getPropertyValue('--chrome-tab-h').trim()")).toBe('0px');
+});
+
+// A link viewer (contrib/link-viewer-return) rebuilds the bar of the window it
+// came from out of that window's snapshot. The page tab is the one the
+// snapshot names, not the first: the rest come back as iframes on their own.
+test('a link viewer coming back to a bar whose page tab is not first keeps that tab the page', async ({page}) => {
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'amux-dragreorder-')));
+  const file = path.join(dir, 'note.md');
+  fs.writeFileSync(file, '# Note\n');
+  try {
+    await page.addInitScript(() => {
+      localStorage.setItem('amux_walkthrough_done', '1');
+      if (sessionStorage.getItem('seeded')) return;
+      sessionStorage.setItem('seeded', '1');
+      localStorage.setItem('amux_chrome_tabs2', JSON.stringify([
+        {id: 3, name: '', hash: '#peek=alpha'}, {id: 1, name: '', hash: '#view=board', page: true}]));
+      localStorage.setItem('amux_chrome_active2', '3');
+    });
+    await page.goto('/?_viewer=1&_from=alpha&_from_tab=3#path=' + file);
+    await page.waitForFunction(() => typeof (window as any)._linkViewerReturn === 'function');
+    await expect(page.locator('#file-overlay')).toHaveClass(/active/, {timeout: 30_000});
+    await page.locator('#file-overlay .file-overlay-header button[onclick="dismissFilePreview()"]').click();
+    await expect(page.locator('body')).not.toHaveClass(/\blink-viewer\b/);
+    expect(await page.evaluate('_chromeTabs.map(t => t.id)')).toEqual([3, 1]);
+    expect(await page.evaluate('_chromePageId'), 'the page tab the snapshot named').toBe(1);
+    await expect.poll(() => page.evaluate('location.hash'), 'the page is on the page tab\'s place').toContain('view=board');
+    await expect(page.locator('#chrome-tab-frames iframe[data-tab-id="3"]')).toHaveAttribute('src', '/?_tab=3#peek=alpha');
+  } finally { fs.rmSync(dir, {recursive: true, force: true}); }
 });
 
 test.describe('desktop', () => {
@@ -71,25 +102,85 @@ test('dragging a later tab along the strip reorders it, and the order survives a
   expect(await page.evaluate(STRIP), 'the order is kept across a reload').toEqual([one, three, two]);
 });
 
-test('dragging a tab to the front moves the page to it, and the old first tab keeps its own place', async ({page}) => {
+// Owner, 2026-11-23: after a drag, going back to a tab loaded the worker list
+// and then its worker. The page tab used to be whichever was first, so a drop
+// in front of it moved the page and rebuilt the old first as a new iframe. A
+// drop now only moves labels: no tab reloads, and each keeps its own view.
+test('dragging a tab to the front reloads nothing, and each tab keeps its own view', async ({page}) => {
   await page.evaluate(filterTo('alpha'));
   const one = await page.evaluate('_chromeTabs[0].id') as number;
   const two = await page.evaluate('_chromeAddTab(), _chromeActiveId') as number;
   const f2 = await tabFrame(page, two);
   await f2.evaluate(filterTo('beta'));
-  await expect.poll(() => page.evaluate(id => sessionStorage.getItem('amux_list_view_v1:tab:' + id), two)).toContain('beta');
+  // Marks on the live windows: a reload or a rebuilt iframe loses them.
+  await page.evaluate("window.__livePage = 1");
+  await f2.evaluate("window.__liveTab = 1");
 
   await dragTab(page, two, one);
   await expect.poll(() => page.evaluate(STRIP)).toEqual([two, one]);
-  // The page now shows the tab that was dragged first; its iframe is gone.
-  await expect.poll(() => page.evaluate('searchQuery')).toBe('beta');
-  await expect(page.locator(`#chrome-tab-frames iframe[data-tab-id="${two}"]`)).toHaveCount(0);
+  expect(await page.evaluate('_chromePageId'), 'the page is still the tab it was').toBe(one);
+  expect(await f2.evaluate('window.__liveTab'), 'the dragged tab was not reloaded').toBe(1);
+  expect(await f2.evaluate('searchQuery')).toBe('beta');
 
-  // The tab that was first is rebuilt as an iframe on its own list view.
-  await page.evaluate(id => (window as any)._chromeSwitchTab(id), one);
-  const f1 = await tabFrame(page, one);
-  await f1.evaluate("switchView('sessions')");
-  expect(await f1.evaluate('searchQuery'), 'the old first tab keeps its filter').toBe('alpha');
+  await page.locator(`.chrome-tab[data-tab-id="${one}"]`).click();
+  await expect(page.locator('#chrome-tab-frames')).not.toHaveClass(/active/);
+  expect(await page.evaluate('window.__livePage'), 'the page tab was not reloaded').toBe(1);
+  expect(await page.evaluate('searchQuery'), 'the page tab keeps its filter').toBe('alpha');
+
+  await page.locator(`.chrome-tab[data-tab-id="${two}"]`).click();
+  await expect(page.locator(`#chrome-tab-frames iframe[data-tab-id="${two}"]`)).toBeVisible();
+  expect(await f2.evaluate('window.__liveTab'), 'switching back shows the same live tab').toBe(1);
+
+  // After a reload the order and the page tab are kept, and the iframe tab is
+  // rebuilt on its own place.
+  await page.reload();
+  await page.waitForFunction(READY);
+  expect(await page.evaluate(STRIP)).toEqual([two, one]);
+  expect(await page.evaluate('_chromePageId')).toBe(one);
+  const g2 = await tabFrame(page, two);
+  await g2.evaluate("switchView('sessions')");
+  expect(await g2.evaluate('searchQuery')).toBe('beta');
+});
+
+// A new tab copies the filters of the tab you came from
+// (contrib/list-filters-and-delete-nav). The page tab's live in the page's own
+// record, wherever the tab sits.
+test('a new tab opened from the page tab copies its filters after the page tab is dragged off the front', async ({page}) => {
+  const one = await page.evaluate('_chromeTabs[0].id') as number;
+  const two = await page.evaluate('_chromeAddTab(), _chromeActiveId') as number;
+  await dragTab(page, one, two);
+  await expect.poll(() => page.evaluate(STRIP)).toEqual([two, one]);
+  await page.locator(`.chrome-tab[data-tab-id="${one}"]`).click();
+  await expect.poll(() => page.evaluate('_chromeActiveId')).toBe(one);
+  // Status filters are copied; search text never is.
+  await page.evaluate("switchView('sessions'); filterStatuses.clear(); filterStatuses.add('blocked'); render()");
+  const three = await page.evaluate('_chromeAddTab(), _chromeActiveId') as number;
+  const f3 = await tabFrame(page, three);
+  await f3.evaluate("switchView('sessions')");
+  expect(await f3.evaluate('[...filterStatuses]'), 'the new tab starts on the page tab\'s filter').toEqual(['blocked']);
+});
+
+// A link opened from the page names the page tab as where it came from, so
+// the link viewer comes back to it, even after it is dragged off the front.
+test('a link from the page names the page tab as its origin after a drag', async ({page}) => {
+  const one = await page.evaluate('_chromeTabs[0].id') as number;
+  const two = await page.evaluate('_chromeAddTab(), _chromeActiveId') as number;
+  await dragTab(page, one, two);
+  await expect.poll(() => page.evaluate(STRIP)).toEqual([two, one]);
+  expect(await page.evaluate('_linkViewerQuery()'), 'the page tab, not the first').toContain('_from_tab=' + one);
+});
+
+// Closing the page tab moves the page to the tab beside it, wherever it sits.
+test('closing the page tab when it is not first moves the page to its neighbour', async ({page}) => {
+  const one = await page.evaluate('_chromeTabs[0].id') as number;
+  const two = await page.evaluate('_chromeAddTab(), _chromeActiveId') as number;
+  const three = await page.evaluate('_chromeAddTab(), _chromeActiveId') as number;
+  await dragTab(page, one, three);
+  await expect.poll(() => page.evaluate(STRIP)).toEqual([two, three, one]);
+  await page.locator(`.chrome-tab[data-tab-id="${one}"] .chrome-tab-close`).click();
+  await expect.poll(() => page.evaluate(STRIP)).toEqual([two, three]);
+  expect(await page.evaluate('_chromePageId'), 'the page moved to the tab beside the closed one').toBe(three);
+  await expect(page.locator(`#chrome-tab-frames iframe[data-tab-id="${three}"]`)).toHaveCount(0);
 });
 
 test('the close button and a plain click still work on a draggable tab', async ({page}) => {
@@ -99,6 +190,28 @@ test('the close button and a plain click still work on a draggable tab', async (
   await expect.poll(() => page.evaluate('_chromeActiveId')).toBe(one);
   await page.locator(`.chrome-tab[data-tab-id="${two}"] .chrome-tab-close`).click();
   await expect.poll(() => page.evaluate(STRIP)).toEqual([one]);
+});
+
+// Owner, 2026-11-23: the hide chevron sat below the middle of the tabs, and
+// once the strip was hidden it was "very very small and hard to press".
+test('the hide chevron is centred on the tabs, a line runs under the strip, and the pull tab is easy to hit', async ({page}) => {
+  const btn = page.locator('.chrome-tab-collapse');
+  // Centred with one tab (no ✕) and with two.
+  for (const n of [1, 2]) {
+    if (n === 2) await page.evaluate('_chromeAddTab()');
+    const b = (await btn.boundingBox())!, t = (await page.locator('.chrome-tab.active').boundingBox())!;
+    expect(Math.abs((b.y + b.height / 2) - (t.y + t.height / 2)), `chevron centred on the tab row with ${n} tab(s)`).toBeLessThanOrEqual(1);
+  }
+  expect(await page.evaluate("getComputedStyle(document.getElementById('chrome-tabs-bar')).boxShadow"), 'the line under the strip').toContain('inset');
+
+  await btn.click();
+  await expect.poll(() => page.evaluate('_chromeCollapsed')).toBe(true);
+  const p = (await btn.boundingBox())!;
+  expect(p.width, 'the pull tab is wide enough to catch').toBeGreaterThanOrEqual(60);
+  expect(Number(await btn.evaluate(e => getComputedStyle(e).opacity)), 'the pull tab is not faded out').toBeGreaterThanOrEqual(0.7);
+  // Its hit area reaches below what it shows.
+  await page.mouse.click(p.x + p.width / 2, p.y + p.height + 6);
+  await expect.poll(() => page.evaluate('_chromeCollapsed'), 'a click just below the pull tab shows the strip').toBe(false);
 });
 
 // Sortable shares the drag in progress across every instance, and destroying
