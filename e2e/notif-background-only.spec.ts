@@ -163,3 +163,18 @@ test('a goal met already shown by the server push is replaced quietly, not repea
   await fire(page, 'w1', 'stopped');
   await expect.poll(() => page.evaluate(() => (window as any)._shown[3]?.tag)).toBe('amux-w1');
 });
+
+// A server older than the page (the trial: origin/main's server under a newer
+// dashboard) has no presence route. The page stops asking after one 404
+// instead of polling it every 15s.
+test('a server without the presence route is asked once, then left alone', async ({ page }) => {
+  await page.addInitScript(fakeDevice);
+  let hits = 0;
+  await page.route('**/api/push/presence', r => { hits++; return r.fulfill({ status: 404, body: 'not found' }); });
+  await page.goto('/');
+  await page.evaluate(() => (window as any)._pushPresenceBeat(true));
+  await expect.poll(() => hits).toBeGreaterThanOrEqual(1);
+  const after = hits;
+  await page.evaluate(async () => { for (let i = 0; i < 3; i++) await (window as any)._pushPresenceBeat(true); });
+  expect(hits).toBe(after);
+});

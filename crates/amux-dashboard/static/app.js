@@ -7052,8 +7052,9 @@ setTimeout(_pushReconcile, 6000);
 // forgets a report after 35s, so a page killed in front gets pushes again.
 let _pushPresenceEndpoint = null;
 let _pushPresenceLast = '';
+let _pushPresenceUnsupported = false;
 async function _pushPresenceBeat(force) {
-  if (!_notifsNative || _notifDesktopPrefs() || _notifInOlderApp()) return;
+  if (_pushPresenceUnsupported || !_notifsNative || _notifDesktopPrefs() || _notifInOlderApp()) return;
   if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
   try {
     if (!_pushPresenceEndpoint) {
@@ -7069,8 +7070,14 @@ async function _pushPresenceBeat(force) {
     // the report from expiring.
     if (!force && !front && sig === _pushPresenceLast) return;
     _pushPresenceLast = sig;
-    await fetch(API + '/api/push/presence', { method: 'POST', keepalive: true,
+    const r = await fetch(API + '/api/push/presence', { method: 'POST', keepalive: true,
       headers: _authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body) });
+    // A server older than this page has no presence route: stop asking rather
+    // than 404 every 15s (the page's own background-only rule still applies).
+    if (r.status === 404) {
+      _pushPresenceUnsupported = true;
+      console.warn('amux: this server has no /api/push/presence; presence reports stopped');
+    }
   } catch (e) { console.warn('amux: presence report not sent (offline?); the server lets it expire', e); }
 }
 ['focus', 'blur', 'pagehide', 'pageshow'].forEach(ev =>
