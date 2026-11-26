@@ -6308,3 +6308,14 @@ CARD: none (board off for this worker; file one on amux-frustrations)
 SYMPTOM: `scripts/land_gate.py` failed 8 of 8 tests in a new dashboard spec (e2e/notif-background-only.spec.ts) that passed 12/12 run by hand. The webServer log read "DASHBOARD: served from AMUX_DASHBOARD_DIR=/Users/javan/.amux/dashboard-local/crates/amux-dashboard/static, NOT the binary's embedded copy". `~/.amux/server.env` sets AMUX_DASHBOARD_DIR and lists it in AMUX_ENV_FROM_FILE, so every worker's shell inherits it from the tmux environment, `playwright()` in land_gate.py copies os.environ, and e2e/serve-head.sh passes the variable through.
 COST: about 25 minutes reading the gate and serve-head.sh. Worse for others: on this Mac every lane's gate tests the LIVE dashboard, so a new spec can only fail, and a dashboard regression in an existing spec passes the gate unseen.
 FIX: in land_gate.py `playwright()`, set `env["AMUX_DASHBOARD_DIR"] = os.path.join(tree, "crates/amux-dashboard/static")` (the composed tree's own bytes), or pop it. land_gate.py is [owner] tier, so the change waits for the owner. Workaround: `env -u AMUX_DASHBOARD_DIR python3 scripts/land_gate.py`.
+
+## The pre-push SPA gate blames a rebased push for tests that already fail on origin/main
+AREA: gates
+SEVERITY: costs-time
+STATUS: open
+DATE: 2026-11-26
+SESSION: pwa-push-prefs
+CARD: none (board off for this worker; file one on amux-frustrations)
+SYMPTOM: re-pushing contrib/pwa-push-prefs after a rebase onto origin/main eb2d4e75f was refused with "2 failing from this push, 0 already failing on the remote": e2e/design-tokens.test.mjs "no visual literal outside the token system" (app.css .pcu-chip 999px / 2px, .mac-set-label gap 2px) and "the lint finds each kind of literal it exists to stop". Neither line is in the branch's diff; a clean origin/main worktree fails the same 2 tests. The hook's baseline is the remote BRANCH's old tip (based on an older main), so anything main gained between the two bases reads as "from this push".
+COST: about 10 minutes proving the failures were inherited; the honest path ends at AMUX_SKIP_SPA_GATES=1, the same override a deliberately red push uses, so the record cannot tell the two apart.
+FIX: baseline the pre-push SPA gates on merge-base(HEAD, origin/main) (or origin/main itself) rather than the remote ref being overwritten, and print "already failing on origin/main" for these.
