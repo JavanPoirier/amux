@@ -606,7 +606,58 @@ fn claude_projects_dir() -> PathBuf {
 pub async fn index_once(store: &SharedStore, home: &Path) -> anyhow::Result<usize> {
     let claims =
         tokio::task::spawn_blocking(crate::api::session_verbs::conversation_claims).await?;
-    index_once_at(store, home, &claude_projects_dir(), &claims).await
+    let homes = tokio::task::spawn_blocking(crate::api::claude_config::every_home).await?;
+    let roots = projects_roots(claude_projects_dir(), &homes);
+    announce_roots(&roots);
+    // Every root, even after one fails: a broken team folder must not hide the
+    // default one's turns, which is the gap this loop exists to close.
+    let mut total = 0usize;
+    let mut first_err = None;
+    for root in &roots {
+        match index_once_at(store, home, root, &claims).await {
+            Ok(n) => total += n,
+            Err(e) => {
+                tracing::warn!(root = %root.display(), error = %e, verdict = "token_ledger_root_failed",
+                    "token-ledger: a transcript folder could not be indexed; the other folders still were");
+                first_err.get_or_insert(e);
+            }
+        }
+    }
+    match first_err {
+        Some(e) if total == 0 => Err(e),
+        _ => Ok(total),
+    }
+}
+
+/// The `projects/` folders the ledger reads: the primary one (`CLAUDE_HOME`
+/// or `~/.claude`) first, then each config folder a worker's Claude was
+/// recorded under. Before this the primary was the only one, and every
+/// worker on `~/.claude-team` spent tokens no cost view could see
+/// (2026-11-26: 12 workers, tv-player's newest row 9 days old).
+fn projects_roots(primary: PathBuf, homes: &[PathBuf]) -> Vec<PathBuf> {
+    let mut roots = vec![primary];
+    for h in homes {
+        let p = h.join("projects");
+        if !roots.contains(&p) {
+            roots.push(p);
+        }
+    }
+    roots
+}
+
+/// Log the set of folders read whenever it changes (startup included), so a
+/// worker's folder missing from the ledger is one grep away:
+/// `verdict="token_ledger_roots"`.
+fn announce_roots(roots: &[PathBuf]) {
+    use std::sync::Mutex;
+    static LAST: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    if last.as_slice() != roots {
+        let shown: Vec<String> = roots.iter().map(|r| r.display().to_string()).collect();
+        tracing::info!(n_roots = roots.len(), roots = ?shown, measured = true, n_considered = roots.len(),
+            verdict = "token_ledger_roots", "token-ledger: reading transcripts from these folders");
+        *last = roots.to_vec();
+    }
 }
 
 /// The pass, with the projects root injected. Split out so tests drive a temp
@@ -1130,6 +1181,20 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), *v))
             .collect()
+    }
+
+    /// The 2026-11-26 gap: workers on `~/.claude-team` were in no cost view.
+    /// Each worker's folder becomes a root, the primary stays first, and the
+    /// default folder (also in `homes`) is not read twice.
+    #[test]
+    fn every_workers_config_folder_is_a_ledger_root() {
+        let primary = PathBuf::from("/h/.claude/projects");
+        let homes = vec![PathBuf::from("/h/.claude"), PathBuf::from("/h/.claude-team")];
+        assert_eq!(
+            projects_roots(primary.clone(), &homes),
+            vec![primary.clone(), PathBuf::from("/h/.claude-team/projects")]
+        );
+        assert_eq!(projects_roots(primary.clone(), &[]), vec![primary]);
     }
 
     // ---- claim windows (AMUX-4750) --------------------------------------

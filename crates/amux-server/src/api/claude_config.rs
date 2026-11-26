@@ -63,6 +63,40 @@ pub(crate) fn search_order(name: &str) -> Vec<PathBuf> {
     }
 }
 
+/// Every config folder any worker's Claude has been recorded under, the
+/// default first, each once. A reader that walks the whole fleet's
+/// transcripts (the token ledger) needs all of them. Measured 2026-11-26: the
+/// ledger read only `~/.claude/projects` while 12 workers ran on
+/// `~/.claude-team`, so their turns, scheduled ones included, were in no cost
+/// view at all (tv-player's last ledger row was 9 days old while it ran
+/// daily). Archived and paused workers count: their older transcripts are
+/// still usage.
+pub(crate) fn every_home() -> Vec<PathBuf> {
+    let recorded = std::fs::read_dir(super::session_verbs::sessions_dir())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_str()?.strip_suffix(".meta.json")?.to_string();
+            Some(meta_str(&load_meta(&name), META_KEY))
+        });
+    homes_from(&claude_home(), recorded)
+}
+
+/// [`every_home`] without the filesystem walk: `default` first, then each
+/// recorded folder that exists, deduplicated. A recorded folder that is gone
+/// is skipped, as [`for_session`] skips it.
+pub(crate) fn homes_from(default: &Path, recorded: impl IntoIterator<Item = String>) -> Vec<PathBuf> {
+    let mut homes = vec![default.to_path_buf()];
+    for r in recorded {
+        let p = resolve(&r, default);
+        if !homes.contains(&p) {
+            homes.push(p);
+        }
+    }
+    homes
+}
+
 /// `CLAUDE_CONFIG_DIR` from a process's environment entries (`KEY=value`).
 /// `Some("")` when the variable is absent or blank: the process uses the
 /// default folder, which is a reading, not a failure.
@@ -371,6 +405,19 @@ mod tests {
         assert_eq!(resolve(&team, default), tmp.path());
         assert_eq!(resolve("", default), default);
         assert_eq!(resolve("/no/such/folder", default), default);
+    }
+
+    /// The fleet's folders: the default first, each recorded folder once, and
+    /// a recorded folder that is gone left out. Twelve workers sharing one team
+    /// folder must make it ONE root, or the ledger would read it twelve times.
+    #[test]
+    fn every_recorded_folder_is_one_root_and_the_default_leads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let default = Path::new("/h/.claude");
+        let team = tmp.path().to_string_lossy().into_owned();
+        let recorded = vec![String::new(), team.clone(), "/no/such/folder".into(), team.clone(), String::new()];
+        assert_eq!(homes_from(default, recorded), vec![default.to_path_buf(), tmp.path().to_path_buf()]);
+        assert_eq!(homes_from(default, Vec::<String>::new()), vec![default.to_path_buf()]);
     }
 
     /// The 2026-11-10 case: a worker whose Claude runs under another
